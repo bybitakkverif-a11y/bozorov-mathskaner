@@ -1,4 +1,3 @@
-
 [project]
 name = "bozorov-omr"
 version = "1.0.0"
@@ -8,11 +7,9 @@ dependencies = [
     "numpy==1.26.4",
     "opencv-python==4.10.0.84",
 ]
-
 [tool.flet]
 org = "uz.bozorovmath"
 product = "Bozorov OMR"
 description = "Bozorov Math Milliy Sertifikat Skaneri"
-
 [tool.flet.android]
 extract_packages = ["cv2"]
