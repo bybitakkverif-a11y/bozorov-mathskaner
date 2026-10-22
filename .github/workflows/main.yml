@@ -92,4 +92,3 @@ jobs:
           name: Bozorov-OMR-APK
           path: build/**/*.apk
           if-no-files-found: error
-```
