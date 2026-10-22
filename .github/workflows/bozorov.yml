@@ -51,8 +51,7 @@ jobs:
             --module-name main \
             --org uz.bozorovmath \
             --project "Bozorov OMR" \
-            --description "Bozorov Math Milliy Sertifikat Skaneri" \
-            --yes
+            --description "Bozorov Math Milliy Sertifikat Skaneri"
 
       - name: Locate APK
         run: |
