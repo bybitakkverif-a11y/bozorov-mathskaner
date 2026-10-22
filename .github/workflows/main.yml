@@ -1,4 +1,3 @@
-
 name: Build Bozorov OMR APK
 
 on:
@@ -65,6 +64,20 @@ jobs:
             numpy==1.26.4 \
             opencv-python==4.10.0.84
           python -c "import numpy, cv2; print('NumPy:', numpy.__version__); print('OpenCV:', cv2.__version__)"
+
+      - name: Debug dependency files
+        run: |
+          echo "=== requirements.txt ==="
+          cat -A requirements.txt
+
+          echo "=== pyproject.toml ==="
+          cat -A pyproject.toml
+
+          echo "=== Flet version ==="
+          flet --version
+
+          echo "=== Flet build options ==="
+          flet build apk --help
 
       - name: Accept Android licenses
         run: |
