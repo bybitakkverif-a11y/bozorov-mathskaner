@@ -18,28 +18,28 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          distribution: zulu
+          distribution: temurin
           java-version: "17"
 
-      - name: Setup Flutter
+      - name: Setup Flutter (Qat'iy 3.19.6)
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          flutter-version: "3.19.6"
 
-      - name: Install Flet (Maxfiy server manzilini ko'rsatish)
+      - name: Install Flet
         run: |
           python -m pip install --upgrade pip
-          pip install flet==0.25.2 pypng --extra-index-url https://pypi.flet.dev
+          pip install flet==0.24.1 pypng
 
-      - name: Clean requirements
+      - name: Majburiy tozalash
         run: |
-          rm -f pyproject.toml
-          echo "flet==0.25.2" > requirements.txt
+          rm -f pyproject.toml requirements.txt
+          echo "flet==0.24.1" > requirements.txt
           echo "pypng" >> requirements.txt
 
       - name: Accept licenses
