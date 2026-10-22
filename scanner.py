@@ -1,9 +1,9 @@
-import cv2
-import numpy as np
 import os
 import time
 import sqlite3
 import json
+import math
+from PIL import Image, ImageDraw, ImageOps, ImageFilter
 
 CONFIG_FILE = "bozorov_config.json"
 DB_FILE = "bozorov_results.db"
@@ -93,120 +93,87 @@ def get_saved_results():
     return rows
 
 
-def order_points(pts):
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-    return rect
-
-
-def four_point_transform(image, pts, W, H):
-    rect = order_points(pts)
-    dst = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], dtype="float32")
-    M = cv2.getPerspectiveTransform(rect, dst)
-    return cv2.warpPerspective(image, M, (W, H))
-
-
-def find_document_quad(image):
-    """Kadr ichidan titulning tashqi katta ramkasini topadi."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edged = cv2.Canny(blur, 40, 140)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    edged = cv2.dilate(edged, kernel, iterations=1)
-
-    cnts, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-
-    img_area = image.shape[0] * image.shape[1]
-    for c in cnts[:5]:
-        area = cv2.contourArea(c)
-        if area < img_area * 0.20:
-            continue
-        peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-        if len(approx) == 4:
-            return approx.reshape(4, 2)
-    return None
-
-
-def warp_full_sheet(image):
-    """1-bosqich: Telefon rasmi yotiq bo'lsa tik qiladi va 1000x1400 o'lchamga tekislaydi."""
-    h, w = image.shape[:2]
-    if w > h:
-        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-
-    W, H = 1000, 1400
-    quad = find_document_quad(image)
-    if quad is not None:
-        return four_point_transform(image, quad, W, H)
-    return cv2.resize(image, (W, H))
-
-
-def extract_test_grid(warped_sheet):
+def auto_trim_borders(pil_img):
     """
-    2-bosqich: 1000x1400 varaq ichidan aynan 35 talik test blokining
-    o'z ramkasini topib, 900x420 o'lchamga 100% aniqlikda tekislaydi.
+    Rasm atrofidagi qora/qorong'u fonni (masalan, stol yuzasini) avtomatik aniqlab,
+    faqat oq titul qog'ozining o'zini qirqib va tekislab oladi.
     """
-    GW, GH = 900, 420
-    gray = cv2.cvtColor(warped_sheet, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 21, 5)
+    small_w, small_h = 250, 350
+    gray_small = pil_img.convert("L").resize((small_w, small_h))
+    px = gray_small.load()
 
-    cnts, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+    # O'rtacha yorug'likni hisoblaymiz
+    total_lum = 0
+    for y in range(40, small_h - 40):
+        for x in range(30, small_w - 30):
+            total_lum += px[x, y]
+    avg_lum = total_lum / float((small_h - 80) * (small_w - 60))
 
-    for c in cnts:
-        area = cv2.contourArea(c)
-        if 200000 < area < 580000:
-            x, y, w, h = cv2.boundingRect(c)
-            aspect = w / float(h)
-            if 1.65 < aspect < 3.3 and 330 < y < 630 and w > 720:
-                peri = cv2.arcLength(c, True)
-                approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-                if len(approx) == 4:
-                    return four_point_transform(warped_sheet, approx.reshape(4, 2), GW, GH)
-                else:
-                    pts = np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype="float32")
-                    return four_point_transform(warped_sheet, pts, GW, GH)
+    # Oq qog'oz chegarasini topish
+    paper_thresh = max(110, int(avg_lum * 0.72))
+    min_x, min_y = small_w, small_h
+    max_x, max_y = 0, 0
 
-    fallback_pts = np.array([[47, 468], [952, 468], [952, 895], [47, 895]], dtype="float32")
-    return four_point_transform(warped_sheet, fallback_pts, GW, GH)
+    for y in range(small_h):
+        for x in range(small_w):
+            if px[x, y] >= paper_thresh:
+                if x < min_x: min_x = x
+                if x > max_x: max_x = x
+                if y < min_y: min_y = y
+                if y > max_y: max_y = y
+
+    if (max_x - min_x) > small_w * 0.5 and (max_y - min_y) > small_h * 0.5:
+        orig_w, orig_h = pil_img.size
+        left = int((min_x / small_w) * orig_w)
+        top = int((min_y / small_h) * orig_h)
+        right = int((max_x / small_w) * orig_w)
+        bottom = int((max_y / small_h) * orig_h)
+        pil_img = pil_img.crop((left, top, right, bottom))
+
+    return pil_img.resize((1000, 1400), Image.Resampling.BILINEAR)
 
 
 def process_sheet(image_path, config, student_note="Talabgor"):
+    """
+    Android APK uchun C++ kompilyatorisiz (100% Pure Python + Pillow) OMR tekshiruvchi dvigatel.
+    35 ta savolni (1-32 A-D, 33-35 A-F) tekshiradi va ism-familiyani qirqib oladi.
+    """
     if not os.path.exists(image_path):
         return {"error": f"Rasm topilmadi: {image_path}"}
 
-    file_bytes = np.fromfile(image_path, dtype=np.uint8)
-    raw_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if raw_img is None:
-        return {"error": "Rasmni o'qib bo'lmadi. Iltimos, sifatli rasm tanlang."}
+    try:
+        raw_img = Image.open(image_path)
+        # Telefon kamerasining EXIF burilishini avtomatik to'g'rilash:
+        raw_img = ImageOps.exif_transpose(raw_img).convert("RGB")
+    except Exception as e:
+        return {"error": f"Rasmni o'qib bo'lmadi: {e}"}
 
-    warped = warp_full_sheet(raw_img)
+    # Agar rasm yotiq (landscape) olingan bo'lsa, tik holatga keltiramiz
+    w, h = raw_img.size
+    if w > h:
+        raw_img = raw_img.rotate(90, expand=True)
+
+    # 1. Varaqni 1000x1400 standart o'lchamga keltirish
+    warped = auto_trim_borders(raw_img)
     ts = int(time.time() * 1000)
 
-    # Ism-familiya blokini qirqib olish
-    name_crop = warped[935:1245, 515:965]
+    # 2. Ism-familiya blokini qirqib olish (pastki o'ng burchak: X=515..965, Y=935..1245)
+    name_crop = warped.crop((515, 935, 965, 1245))
     name_crop_path = os.path.join(CROPS_DIR, f"name_{ts}.jpg")
-    cv2.imwrite(name_crop_path, name_crop)
+    name_crop.save(name_crop_path, "JPEG", quality=90)
 
-    # 35 talik test jadvalini qulflab olish
-    grid_img = extract_test_grid(warped)
+    # 3. 35 talik test jadvalini qirqib olish (X=47..952, Y=468..895 -> 900x420)
+    grid_img = warped.crop((47, 468, 952, 895)).resize((900, 420), Image.Resampling.BILINEAR)
     annotated_grid = grid_img.copy()
+    draw = ImageDraw.Draw(annotated_grid)
 
-    gray_grid = cv2.cvtColor(grid_img, cv2.COLOR_BGR2GRAY)
-    blur_grid = cv2.GaussianBlur(gray_grid, (3, 3), 0)
+    # Kontrastni kuchaytirib, kulrang (grayscale) piksellar matritsasini olamiz
+    gray_grid = ImageOps.autocontrast(grid_img.convert("L"), cutoff=2)
+    # Kichik shovqinlarni tekislash
+    gray_grid = gray_grid.filter(ImageFilter.MedianFilter(size=3))
+    px = gray_grid.load()
 
-    thresh = cv2.adaptiveThreshold(
-        blur_grid, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 25, 9
-    )
-
+    # 900x420 o'lchamdagi test bloki ichida 5 ta ustun va 7 ta qatorning aniq markazlari:
     col_start_x = [68, 228, 389, 550, 710]
     bubble_dx = 26.2
     row_y = [60, 110, 160, 210, 260, 310, 360]
@@ -231,7 +198,21 @@ def process_sheet(image_path, config, student_note="Talabgor"):
             q_score = float(scores_cfg.get(q_str, 1.5))
             correct_opt = keys_cfg.get(q_str, "A")
 
+            # Mahalliy fon yorug'ligini aniqlash (shu savol atrofidagi oq qog'oz rangi)
+            base_x = int(col_start_x[col])
+            base_y = int(row_y[row])
+            bg_samples = []
+            for sy in range(max(0, base_y - 22), min(420, base_y + 22), 6):
+                for sx in range(max(0, base_x - 15), min(900, base_x + 150), 8):
+                    bg_samples.append(px[sx, sy])
+            bg_samples.sort(reverse=True)
+            # Eng yorug' 30% nuqtaning o'rtachasi = toza oq qog'oz yorug'ligi
+            top_n = max(1, len(bg_samples) // 3)
+            local_paper_lum = sum(bg_samples[:top_n]) / float(top_n)
+            dark_threshold = local_paper_lum * 0.72  # Shundan qorong'u piksellar = ruchka siyohi
+
             fill_ratios = {}
+            darkness_scores = {}
             coords = {}
 
             for idx, opt in enumerate(options):
@@ -239,23 +220,41 @@ def process_sheet(image_path, config, student_note="Talabgor"):
                 cy = int(round(row_y[row]))
                 coords[opt] = (cx, cy)
 
-                mask = np.zeros(thresh.shape, dtype="uint8")
-                cv2.circle(mask, (cx, cy), r_inner, 255, -1)
+                dark_pixels = 0
+                total_pixels = 0
+                lum_sum = 0
 
-                masked_thresh = cv2.bitwise_and(thresh, thresh, mask=mask)
-                area_pixels = max(1, cv2.countNonZero(mask))
-                fill_ratios[opt] = cv2.countNonZero(masked_thresh) / float(area_pixels)
+                for dy in range(-r_inner, r_inner + 1):
+                    for dx in range(-r_inner, r_inner + 1):
+                        if dx * dx + dy * dy <= r_inner * r_inner:
+                            nx, ny = cx + dx, cy + dy
+                            if 0 <= nx < 900 and 0 <= ny < 420:
+                                val = px[nx, ny]
+                                total_pixels += 1
+                                lum_sum += val
+                                if val < dark_threshold:
+                                    dark_pixels += 1
 
-                cv2.circle(annotated_grid, (cx, cy), 2, (255, 120, 0), -1)
+                total_pixels = max(1, total_pixels)
+                fill_ratios[opt] = dark_pixels / float(total_pixels)
+                mean_lum = lum_sum / float(total_pixels)
+                # Qorayish darajasi (0.0 = oppoq, 1.0 = qop-qora)
+                darkness_scores[opt] = max(0.0, (local_paper_lum - mean_lum) / max(1.0, local_paper_lum))
 
-            max_opt = max(fill_ratios, key=fill_ratios.get)
-            max_fill = fill_ratios[max_opt]
-            min_fill = min(fill_ratios.values())
+                # Kalibrlash nuqtasi (markazda kichik ko'k nuqta)
+                draw.ellipse((cx - 2, cy - 2, cx + 2, cy + 2), fill=(0, 120, 255))
+
+            # Eng ko'p bo'yalgan doirachani aniqlash
+            combined = {opt: (fill_ratios[opt] * 0.65 + darkness_scores[opt] * 0.35) for opt in options}
+            max_opt = max(combined, key=combined.get)
+            max_val = combined[max_opt]
+            min_val = min(combined.values())
 
             marked = []
-            if max_fill >= 0.44 and (max_fill - min_fill) >= 0.18:
+            # Agar doiracha aniq bo'yalgan bo'lsa (bo'sh doirachalardan kamida 0.16 ga farq qilsa):
+            if max_val >= 0.32 and (max_val - min_val) >= 0.15:
                 for opt in options:
-                    if fill_ratios[opt] >= 0.44 and fill_ratios[opt] >= max_fill * 0.80:
+                    if combined[opt] >= 0.32 and combined[opt] >= max_val * 0.78:
                         marked.append(opt)
 
             status = ""
@@ -266,14 +265,16 @@ def process_sheet(image_path, config, student_note="Talabgor"):
                 status = "BELGILANMAGAN"
                 wrong_count += 1
                 if correct_opt in coords:
-                    cv2.circle(annotated_grid, coords[correct_opt], r_draw, (0, 180, 255), 2)
+                    cx, cy = coords[correct_opt]
+                    draw.ellipse((cx - r_draw, cy - r_draw, cx + r_draw, cy + r_draw), outline=(255, 165, 0), width=2)
             elif len(marked) > 1:
                 status = "2+ BELGI (0 BALL)"
                 user_ans = ",".join(marked)
                 invalid_count += 1
                 wrong_count += 1
                 for m in marked:
-                    cv2.circle(annotated_grid, coords[m], r_draw, (0, 0, 255), 2)
+                    cx, cy = coords[m]
+                    draw.ellipse((cx - r_draw, cy - r_draw, cx + r_draw, cy + r_draw), outline=(220, 38, 38), width=3)
             else:
                 user_ans = marked[0]
                 if user_ans == correct_opt:
@@ -281,13 +282,16 @@ def process_sheet(image_path, config, student_note="Talabgor"):
                     earned = q_score
                     total_score += earned
                     correct_count += 1
-                    cv2.circle(annotated_grid, coords[user_ans], r_draw, (0, 200, 0), 3)
+                    cx, cy = coords[user_ans]
+                    draw.ellipse((cx - r_draw, cy - r_draw, cx + r_draw, cy + r_draw), outline=(22, 163, 74), width=3)
                 else:
                     status = "XATO"
                     wrong_count += 1
-                    cv2.circle(annotated_grid, coords[user_ans], r_draw, (0, 0, 255), 3)
+                    cx, cy = coords[user_ans]
+                    draw.ellipse((cx - r_draw, cy - r_draw, cx + r_draw, cy + r_draw), outline=(220, 38, 38), width=3)
                     if correct_opt in coords:
-                        cv2.circle(annotated_grid, coords[correct_opt], r_draw, (0, 200, 0), 2)
+                        kx, ky = coords[correct_opt]
+                        draw.ellipse((kx - r_draw, ky - r_draw, kx + r_draw, ky + r_draw), outline=(22, 163, 74), width=2)
 
             details.append({
                 "q": q_num,
@@ -299,7 +303,7 @@ def process_sheet(image_path, config, student_note="Talabgor"):
             })
 
     annotated_path = os.path.join(CROPS_DIR, f"checked_{ts}.jpg")
-    cv2.imwrite(annotated_path, annotated_grid)
+    annotated_grid.save(annotated_path, "JPEG", quality=92)
 
     save_result_to_db(
         student_note=student_note,
